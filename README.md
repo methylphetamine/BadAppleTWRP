@@ -15,6 +15,7 @@ running OrangeFox 12.1, built by
 - Every frame is padded to the height of the console and sent to the recovery as one block of `ui_print` commands, so each frame pushes the previous one off the screen.
 - `set_progress` drives the install progress bar, so it works as a seek bar.
 - The touchscreen is locked while the video plays, because touching the console disables its auto-scroll. It is restored when playback ends or the script is interrupted.
+- The installer console can only **append** text, so frames accumulate there. The framebuffer build (`begonia-fb`) instead freezes the recovery GUI, redraws `/dev/graphics/fb0` for every frame and clears the screen first, so the picture is replaced rather than stacked.">
 
 ## Requirements
 
@@ -70,7 +71,21 @@ python build.py --device begonia
 ```
 
 A prebuilt full player (3286 frames, 3:39) and the calibration zip are on the
-[releases page](https://github.com/methylphetamine/BadAppleTWRP/releases/tag/begonia-orangeFox-r12.1).
+[releases page](https://github.com/methylphetamine/BadAppleTWRP/releases/tag/begonia-orangeFox-r12.2).
+
+The framebuffer build (recommended - clears the screen every frame):
+```sh
+python tools/build-fbplayer.sh build/fbplayer
+python build.py --device begonia-fb
+# dist/BadApple_begonia_fb.zip
+```
+
+The console fallback:
+```sh
+python tools/convert.py badapple.mp4 --cols 52 --rows 19 --fps 15
+python build.py --device begonia
+# dist/BadApple_begonia_orangeFox_rows48.zip
+```
 
 `--device begonia` sets `/sbin/sh`, 48 console rows, 19 rows per frame,
 52 columns and the `rows48` output name. The name also acts as the runtime

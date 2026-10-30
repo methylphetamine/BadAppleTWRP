@@ -32,6 +32,21 @@ PROFILES = {
         "delay": "0.063",
         "output": os.path.join("dist", "BadApple_begonia_orangeFox_rows48.zip"),
     },
+    # Framebuffer build: the installer console can only append text, so the
+    # console profile accumulates frames.  This profile ships fbplayer, which
+    # freezes the recovery GUI and redraws fb0 for every frame, clearing the
+    # screen in between.
+    "begonia-fb": {
+        "label": "Xiaomi Redmi Note 8 Pro (begonia), OrangeFox 12.1 (framebuffer)",
+        "shell": "/sbin/sh",
+        "rows": 48,
+        "content_rows": 19,
+        "cols": 52,
+        "delay": "0.063",
+        "output": os.path.join("dist", "BadApple_begonia_fb.zip"),
+        "framebuffer": True,
+        "player": os.path.join("build", "fbplayer"),
+    },
 }
 
 DEFAULTS = {
@@ -117,6 +132,39 @@ def build_player(args):
     )
 
 
+def build_framebuffer(args, profile):
+    frames = read(args.frames)
+    total = check_frames(frames, args.content_rows, args.cols)
+    script = read("src/update-binary.sh")
+    script = set_shell(script, args.shell)
+    script = set_assignment(script, b"CONTENT", args.content_rows)
+    script = set_assignment(script, b"ROWS", args.rows)
+    script = set_assignment(script, b"DELAY", args.delay)
+    # The frames are a zip member in this build, not an appended blob.
+    if b"\n__DATA__\n" not in script:
+        sys.exit("update-binary.sh is missing its __DATA__ marker")
+    script = script.replace(b"\n__DATA__\n", b"\n", 1)
+    if not script.endswith(b"\n"):
+        script += b"\n"
+
+    player_path = os.path.join(ROOT, profile["player"])
+    if not os.path.exists(player_path):
+        sys.exit(f"missing {player_path}; run tools/build-fbplayer.sh first")
+    player = read(profile["player"])
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    with zipfile.ZipFile(args.output, "w") as archive:
+        add(archive, SCRIPT_PATH, script, 0o755)
+        add(archive, UPDATER_PATH, read("src/updater-script"), 0o644)
+        add(archive, "frames.txt", frames, 0o644)
+        add(archive, "fbplayer", player, 0o755)
+        add(archive, MARKER, b"", 0o644)
+    print(
+        f"{args.output}: {total} frames, {args.cols}x{args.content_rows} cells, "
+        f"framebuffer player {len(player)} bytes, {os.path.getsize(args.output)} bytes"
+    )
+
+
 def build_calibration(args):
     script = set_shell(read("src/rows-calibration.sh"), args.shell)
     os.makedirs(os.path.dirname(os.path.abspath(args.calibration_output)), exist_ok=True)
@@ -168,6 +216,8 @@ def main():
 
     if args.calibration:
         build_calibration(args)
+    elif profile.get("framebuffer"):
+        build_framebuffer(args, profile)
     else:
         build_player(args)
 

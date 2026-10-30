@@ -233,8 +233,60 @@ restore_touch() {
   LOCKED=""
 }
 
-trap 'restore_touch' EXIT
-trap 'restore_touch; exit 1' INT TERM HUP
+# The framebuffer player needs exclusive use of the display, so the recovery
+# GUI is stopped while it runs (foxbrowse does the same on this device).  If
+# the GUI is not resumed the screen stays frozen until a reboot, so every exit
+# path resumes it, and a watcher resumes it even if this shell is killed.
+GUI_PID=""
+WDPID=""
+PLAYER_PID=""
+
+resume_gui() {
+  if [ -n "$WDPID" ]; then
+    kill "$WDPID" 2>/dev/null
+    WDPID=""
+  fi
+  if [ -n "$PLAYER_PID" ]; then
+    kill "$PLAYER_PID" 2>/dev/null
+    PLAYER_PID=""
+  fi
+  if [ -n "$GUI_PID" ]; then
+    kill -CONT "$GUI_PID" 2>/dev/null
+    say "gui resumed ($GUI_PID)"
+    GUI_PID=""
+  fi
+}
+
+freeze_gui() {
+  [ "$FBMODE" = 1 ] || return 0
+  [ "${BA_NOFREEZE:-0}" = 1 ] && return 0
+  GP=$(pidof recovery 2>/dev/null)
+  GP=${GP%% *}
+  [ -n "$GP" ] || { say "no recovery pid, not freezing"; return 0; }
+  kill -STOP "$GP" 2>/dev/null || { say "cannot stop recovery"; return 0; }
+  GUI_PID=$GP
+  say "gui frozen ($GUI_PID)"
+}
+
+# Run the player in the background and wait for it, so a TERM (cancel button)
+# interrupts the wait and the trap can kill the player and resume the GUI.
+play_fb() {
+  "$PLAYER" "$FRAMES" --rows "$CONTENT" --cols "$COLS" --fps "${BA_FPS:-15}" >>"$LOGF" 2>&1 &
+  PLAYER_PID=$!
+  # Watcher: if the player dies without the shell noticing (SIGKILL), still
+  # bring the GUI back.  ~16 minutes hard cap, then give up and resume.
+  ( i=0; while kill -0 "$PLAYER_PID" 2>/dev/null && [ "$i" -lt 500 ]; do sleep 2; i=$((i+1)); done; kill -CONT "$GUI_PID" 2>/dev/null ) >/dev/null 2>&1 &
+  WDPID=$!
+  wait "$PLAYER_PID"
+  PRC=$?
+  PLAYER_PID=""
+  kill "$WDPID" 2>/dev/null
+  WDPID=""
+  return $PRC
+}
+
+trap 'resume_gui; restore_touch' EXIT
+trap 'resume_gui; restore_touch; exit 1' INT TERM HUP
 
 say "args: $*"
 say "storage:$CANDS"
@@ -263,13 +315,21 @@ else
 fi
 
 rm -f "$FRAMES"
-for f in "$0" /tmp/updater /tmp/update-binary; do
-  [ -f "$f" ] || continue
-  sed '1,/^__DATA__$/d' "$f" > "$FRAMES" 2>/dev/null
-  [ -s "$FRAMES" ] && break
-done
+if [ -f "$0" ] && grep -q '^__DATA__$' "$0" 2>/dev/null; then
+  sed '1,/^__DATA__$/d' "$0" > "$FRAMES" 2>/dev/null
+fi
+if [ ! -s "$FRAMES" ]; then
+  for f in /tmp/updater /tmp/update-binary; do
+    [ -f "$f" ] || continue
+    grep -q '^__DATA__$' "$f" 2>/dev/null || continue
+    sed '1,/^__DATA__$/d' "$f" > "$FRAMES" 2>/dev/null
+    [ -s "$FRAMES" ] && break
+  done
+fi
 if [ ! -s "$FRAMES" ] && command -v unzip >/dev/null 2>&1; then
-  unzip -p "$ZIP" META-INF/com/google/android/update-binary 2>/dev/null | sed '1,/^__DATA__$/d' > "$FRAMES"
+  # Framebuffer builds ship the frames as a zip member instead of appending
+  # them to this script.
+  unzip -p "$ZIP" frames.txt > "$FRAMES" 2>/dev/null
 fi
 
 NL=$(wc -l < "$FRAMES" 2>/dev/null || echo 0)
@@ -279,6 +339,15 @@ if [ "$TOTAL" -lt 1 ]; then
   ui_print "ERROR: cannot read frame data."
   savelog
   exit 1
+fi
+
+COLS=52
+if command -v awk >/dev/null 2>&1; then
+  _c=$(awk 'NR==1{print length($0); exit}' "$FRAMES" 2>/dev/null)
+  case "$_c" in
+    ''|*[!0-9]*) ;;
+    *) [ "$_c" -gt 0 ] && COLS=$_c ;;
+  esac
 fi
 
 mkpad "$TOP"; PT="$PADOUT"
@@ -309,6 +378,45 @@ fi
 ui_print "Starting in 3"; sleep 1
 ui_print "2"; sleep 1
 ui_print "1"; sleep 1
+
+# Framebuffer playback: ui_print can only append to the console scroll list, so
+# the console build accumulates every frame.  When the zip carries the player
+# binary, draw straight to fb0 and clear the screen for every frame instead.
+PLAYER=${BA_PLAYER:-/tmp/ba_fbplayer}
+FBMODE=0
+case "${BA_FB:-auto}" in
+  0) ;;
+  1) FBMODE=1 ;;
+  *)
+    if [ -c /dev/graphics/fb0 ] && command -v unzip >/dev/null 2>&1; then
+      rm -rf /tmp/ba
+      mkdir -p /tmp/ba
+      if unzip -o -q -d /tmp/ba "$ZIP" fbplayer >/dev/null 2>&1 && [ -s /tmp/ba/fbplayer ]; then
+        cp /tmp/ba/fbplayer "$PLAYER" 2>/dev/null && chmod 0755 "$PLAYER" 2>/dev/null
+      fi
+    fi
+    ;;
+esac
+[ -x "$PLAYER" ] || FBMODE=0
+say "fb=$FBMODE player=$PLAYER cols=$COLS"
+
+if [ "$FBMODE" = 1 ]; then
+  A0=$(date +%s)
+  freeze_gui
+  play_fb
+  PRC=$?
+  resume_gui
+  A1=$(date +%s)
+  say "fb time=$((A1-A0))s rc=$PRC"
+  if [ "$PRC" -eq 0 ]; then
+    restore_touch
+    send "set_progress 1.0"
+    ui_print "DONE. Time: $((A1-A0))s"
+    savelog
+    exit 0
+  fi
+  ui_print "Framebuffer failed, falling back to console"
+fi
 
 A0=$(date +%s)
 n=0

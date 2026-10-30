@@ -44,6 +44,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Collect frames
         env:
           FRAMES_URL: ${{ inputs.frames_url }}
@@ -62,7 +65,13 @@ jobs:
           test -s frames/frames.txt
           wc -l frames/frames.txt
 
-      - name: Build player zip
+      - name: Build framebuffer player
+        run: |
+          set -eu
+          sh tools/build-fbplayer.sh build/fbplayer
+          file build/fbplayer
+
+      - name: Build console player zip
         env:
           ROWS: ${{ inputs.rows }}
           CONTENT_ROWS: ${{ inputs.content_rows }}
@@ -75,42 +84,64 @@ jobs:
           if [ -n "${DELAY:-}" ]; then args+=(--delay "$DELAY"); fi
           python build.py "${args[@]}"
 
+      - name: Build framebuffer player zip
+        env:
+          ROWS: ${{ inputs.rows }}
+          CONTENT_ROWS: ${{ inputs.content_rows }}
+          DELAY: ${{ inputs.delay }}
+        run: |
+          set -eu
+          args=(--device begonia-fb)
+          if [ -n "${ROWS:-}" ]; then args+=(--rows "$ROWS"); fi
+          if [ -n "${CONTENT_ROWS:-}" ]; then args+=(--content-rows "$CONTENT_ROWS"); fi
+          if [ -n "${DELAY:-}" ]; then args+=(--delay "$DELAY"); fi
+          python build.py "${args[@]}"
+
       - name: Build rows calibration zip
         run: python build.py --device begonia --calibration
 
       - name: Verify zips
         run: |
           set -eu
-          player=$(ls dist/BadApple_begonia_orangeFox_rows*.zip)
-          unzip -l "$player"
-          unzip -l dist/rows_calibration.zip
-          unzip -p "$player" META-INF/com/google/android/update-binary \
-            | sed -n '1,12p'
-          unzip -p "$player" META-INF/com/google/android/update-binary \
-            | grep -qx '__DATA__' && echo "frame marker present"
-          unzip -p "$player" cq61tech >/dev/null && echo "marker file present"
-          python - "$player" <<'PY'
+          console=$(ls dist/BadApple_begonia_orangeFox_rows*.zip)
+          fb=$(ls dist/BadApple_begonia_fb.zip)
+          echo "== console"; unzip -l "$console" | tail -4
+          echo "== fb"; unzip -l "$fb" | tail -6
+          echo "== script header"
+          unzip -p "$console" META-INF/com/google/android/update-binary | sed -n '1,12p'
+          python - "$console" "$fb" <<'PY'
           import re, sys, zipfile
-          z = zipfile.ZipFile(sys.argv[1])
-          assert sorted(z.namelist()) == sorted([
-              "META-INF/com/google/android/update-binary",
-              "META-INF/com/google/android/updater-script",
-              "cq61tech",
-          ]), z.namelist()
-          payload = z.read("META-INF/com/google/android/update-binary")
-          content = int(re.search(rb"(?m)^CONTENT=(\d+)$", payload).group(1))
-          data = payload.split(b"\n__DATA__\n", 1)[1].split(b"\n")[:-1]
-          assert len(data) % content == 0, (len(data), content)
-          widths = sorted({len(line) for line in data})
-          assert widths and max(widths) <= 56, widths
-          print(f"verified: {len(data)//content} frames, {content} rows, widths {widths}")
+          for path, expect_fb in [(sys.argv[1], False), (sys.argv[2], True)]:
+              z = zipfile.ZipFile(path)
+              print(path, z.namelist())
+              payload = z.read("META-INF/com/google/android/update-binary")
+              content = int(re.search(rb"(?m)^CONTENT=(\d+)$", payload).group(1))
+              if expect_fb:
+                  assert "frames.txt" in z.namelist() and "fbplayer" in z.namelist()
+                  assert b"\n__DATA__\n" not in payload
+              else:
+                  assert "frames.txt" not in z.namelist()
+                  assert b"\n__DATA__\n" in payload
+                  data = payload.split(b"\n__DATA__\n", 1)[1].split(b"\n")[:-1]
+                  assert len(data) % content == 0
+                  widths = sorted({len(line) for line in data})
+                  assert max(widths) <= 56, widths
+                  print(f"  console: {len(data)//content} frames, widths {widths}")
+          print("verified ok")
           PY
 
-      - name: Upload player zip
+      - name: Upload console zip
         uses: actions/upload-artifact@v4
         with:
-          name: BadApple-begonia-OrangeFox-${{ github.run_number }}
+          name: BadApple-begonia-console-${{ github.run_number }}
           path: dist/BadApple_begonia_orangeFox_rows*.zip
+          if-no-files-found: error
+
+      - name: Upload framebuffer zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: BadApple-begonia-fb-${{ github.run_number }}
+          path: dist/BadApple_begonia_fb.zip
           if-no-files-found: error
 
       - name: Upload calibration zip
