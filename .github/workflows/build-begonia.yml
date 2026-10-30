@@ -1,0 +1,121 @@
+name: Build BadApple zip (begonia / OrangeFox)
+
+on:
+  workflow_dispatch:
+    inputs:
+      frames_url:
+        description: Direct URL to a frames.txt (empty = bundled test animation)
+        required: false
+        default: ""
+      rows:
+        description: Visible console rows
+        required: false
+        default: "48"
+      content_rows:
+        description: Rows per frame (must match the frames file)
+        required: false
+        default: "19"
+      delay:
+        description: Delay between frames in seconds
+        required: false
+        default: "0.063"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: badapple-begonia-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Collect frames
+        env:
+          FRAMES_URL: ${{ inputs.frames_url }}
+          CONTENT_ROWS: ${{ inputs.content_rows }}
+        run: |
+          set -eu
+          mkdir -p frames
+          if [ -n "${FRAMES_URL:-}" ]; then
+            echo "Downloading frames from the workflow input"
+            curl -fsSL --retry 3 --retry-delay 2 "$FRAMES_URL" -o frames/frames.txt
+          else
+            echo "No frames_url given, generating the original test animation"
+            python tools/make_demo_frames.py \
+              --rows "${CONTENT_ROWS:-19}" --cols 52 --output frames/frames.txt
+          fi
+          test -s frames/frames.txt
+          wc -l frames/frames.txt
+
+      - name: Build player zip
+        env:
+          ROWS: ${{ inputs.rows }}
+          CONTENT_ROWS: ${{ inputs.content_rows }}
+          DELAY: ${{ inputs.delay }}
+        run: |
+          set -eu
+          args=(--device begonia)
+          if [ -n "${ROWS:-}" ]; then args+=(--rows "$ROWS"); fi
+          if [ -n "${CONTENT_ROWS:-}" ]; then args+=(--content-rows "$CONTENT_ROWS"); fi
+          if [ -n "${DELAY:-}" ]; then args+=(--delay "$DELAY"); fi
+          python build.py "${args[@]}"
+
+      - name: Build rows calibration zip
+        run: python build.py --device begonia --calibration
+
+      - name: Verify zips
+        run: |
+          set -eu
+          player=$(ls dist/BadApple_begonia_orangeFox_rows*.zip)
+          unzip -l "$player"
+          unzip -l dist/rows_calibration.zip
+          unzip -p "$player" META-INF/com/google/android/update-binary \
+            | sed -n '1,12p'
+          unzip -p "$player" META-INF/com/google/android/update-binary \
+            | grep -qx '__DATA__' && echo "frame marker present"
+          unzip -p "$player" cq61tech >/dev/null && echo "marker file present"
+          python - "$player" <<'PY'
+          import re, sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          assert sorted(z.namelist()) == sorted([
+              "META-INF/com/google/android/update-binary",
+              "META-INF/com/google/android/updater-script",
+              "cq61tech",
+          ]), z.namelist()
+          payload = z.read("META-INF/com/google/android/update-binary")
+          content = int(re.search(rb"(?m)^CONTENT=(\d+)$", payload).group(1))
+          data = payload.split(b"\n__DATA__\n", 1)[1].split(b"\n")[:-1]
+          assert len(data) % content == 0, (len(data), content)
+          widths = sorted({len(line) for line in data})
+          assert widths and max(widths) <= 56, widths
+          print(f"verified: {len(data)//content} frames, {content} rows, widths {widths}")
+          PY
+
+      - name: Upload player zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: BadApple-begonia-OrangeFox-${{ github.run_number }}
+          path: dist/BadApple_begonia_orangeFox_rows*.zip
+          if-no-files-found: error
+
+      - name: Upload calibration zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: rows-calibration-begonia-${{ github.run_number }}
+          path: dist/rows_calibration.zip
+          if-no-files-found: error

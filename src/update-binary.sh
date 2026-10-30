@@ -205,8 +205,13 @@ lock_touch() {
     case "$nm" in
       *[Kk]ey*|*[Bb]utton*|*[Pp]ower*) continue ;;
     esac
+    # MediaTek touch panels (begonia / mt6785) expose a virtual mouse named
+    # hbtp_vm next to the real touch device; TW_INPUT_BLACKLIST ignores it.
     case "$nm" in
-      *ouch*|*sec_ts*|*fts*|*focal*|*tsp*|*ynaptics*|*melfas*|*mxt*|*oodix*|*gt9*|*nt36*|*novatek*|*ilitek*|*himax*|*elan*|*atmel*|*cyttsp*) ;;
+      *hbtp*vm*) continue ;;
+    esac
+    case "$nm" in
+      *ouch*|*sec_ts*|*fts*|*focal*|*tsp*|*ynaptics*|*melfas*|*mxt*|*oodix*|*gt9*|*nt36*|*novatek*|*ilitek*|*himax*|*elan*|*atmel*|*cyttsp*|*hbtp*) ;;
       *) continue ;;
     esac
     say "touch candidate: $d ($nm)"
