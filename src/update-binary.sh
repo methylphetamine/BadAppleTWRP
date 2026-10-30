@@ -237,7 +237,7 @@ restore_touch() {
 # GUI is stopped while it runs (foxbrowse does the same on this device).  If
 # the GUI is not resumed the screen stays frozen until a reboot, so every exit
 # path resumes it, and a watcher resumes it even if this shell is killed.
-GUI_PID=""
+GUI_PIDS=""
 WDPID=""
 PLAYER_PID=""
 
@@ -250,22 +250,45 @@ resume_gui() {
     kill "$PLAYER_PID" 2>/dev/null
     PLAYER_PID=""
   fi
-  if [ -n "$GUI_PID" ]; then
-    kill -CONT "$GUI_PID" 2>/dev/null
-    say "gui resumed ($GUI_PID)"
-    GUI_PID=""
+  if [ -n "$GUI_PIDS" ]; then
+    for p in $GUI_PIDS; do
+      kill -CONT "$p" 2>/dev/null
+    done
+    say "gui resumed ($GUI_PIDS)"
+    GUI_PIDS=""
   fi
+}
+
+# pidof is the quick path, but some toybox builds ship it without /proc access
+# to other processes.  Scanning /proc/comm always works in recovery.
+find_gui() {
+  if command -v pidof >/dev/null 2>&1; then
+    GP=$(pidof recovery 2>/dev/null)
+    if [ -n "$GP" ]; then
+      echo "$GP"
+      return 0
+    fi
+  fi
+  for p in $(ls /proc 2>/dev/null); do
+    case "$p" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$(cat "/proc/$p/comm" 2>/dev/null)" = "recovery" ] && echo "$p"
+  done
 }
 
 freeze_gui() {
   [ "$FBMODE" = 1 ] || return 0
   [ "${BA_NOFREEZE:-0}" = 1 ] && return 0
-  GP=$(pidof recovery 2>/dev/null)
-  GP=${GP%% *}
+  GP=$(find_gui)
   [ -n "$GP" ] || { say "no recovery pid, not freezing"; return 0; }
-  kill -STOP "$GP" 2>/dev/null || { say "cannot stop recovery"; return 0; }
-  GUI_PID=$GP
-  say "gui frozen ($GUI_PID)"
+  for p in $GP; do
+    kill -STOP "$p" 2>/dev/null && GUI_PIDS="$GUI_PIDS $p"
+  done
+  [ -n "$GUI_PIDS" ] || { say "cannot stop recovery"; return 0; }
+  # Let an in-flight GUI frame land before the player takes the framebuffer.
+  sleep 0.2
+  say "gui frozen ($GUI_PIDS)"
 }
 
 # Run the player in the background and wait for it, so a TERM (cancel button)
@@ -275,7 +298,7 @@ play_fb() {
   PLAYER_PID=$!
   # Watcher: if the player dies without the shell noticing (SIGKILL), still
   # bring the GUI back.  ~16 minutes hard cap, then give up and resume.
-  ( i=0; while kill -0 "$PLAYER_PID" 2>/dev/null && [ "$i" -lt 500 ]; do sleep 2; i=$((i+1)); done; kill -CONT "$GUI_PID" 2>/dev/null ) >/dev/null 2>&1 &
+  ( i=0; while kill -0 "$PLAYER_PID" 2>/dev/null && [ "$i" -lt 500 ]; do sleep 2; i=$((i+1)); done; for p in $GUI_PIDS; do kill -CONT "$p" 2>/dev/null; done ) >/dev/null 2>&1 &
   WDPID=$!
   wait "$PLAYER_PID"
   PRC=$?
@@ -384,21 +407,67 @@ ui_print "1"; sleep 1
 # binary, draw straight to fb0 and clear the screen for every frame instead.
 PLAYER=${BA_PLAYER:-/tmp/ba_fbplayer}
 FBMODE=0
+FBDIR=""
+FBWHY=""
+
+# The GUI (libminuitwrp) opens /dev/graphics/fb0 on this device, so that node
+# is the one that is really on screen.  Check a couple of fallbacks anyway.
+for d in /dev/graphics/fb0 /dev/fb0 /dev/fb/0; do
+  if [ -c "$d" ]; then
+    FBDIR=$d
+    break
+  fi
+done
+
+unpack_player() {
+  [ -n "$ZIP" ] || return 1
+  rm -rf /tmp/ba
+  mkdir -p /tmp/ba 2>/dev/null || return 1
+  for u in unzip "busybox unzip" "toybox unzip"; do
+    $u -o -q -d /tmp/ba "$ZIP" fbplayer >/dev/null 2>&1 && break
+    $u -d /tmp/ba "$ZIP" fbplayer >/dev/null 2>&1 && break
+  done
+  [ -s /tmp/ba/fbplayer ] || return 1
+  cp /tmp/ba/fbplayer "$PLAYER" 2>/dev/null || return 1
+  chmod 0755 "$PLAYER" 2>/dev/null
+  [ -x "$PLAYER" ]
+}
+
+# Open the framebuffer once before freezing anything, so a broken fb0 leaves
+# the recovery GUI untouched instead of leaving a black screen behind.
+probe_player() {
+  [ -x "$PLAYER" ] || return 1
+  "$PLAYER" --probe </dev/null >/dev/null 2>&1
+}
+
 case "${BA_FB:-auto}" in
-  0) ;;
-  1) FBMODE=1 ;;
+  0)
+    FBWHY="disabled by ba_fb"
+    ;;
+  1)
+    FBMODE=1
+    ;;
   *)
-    if [ -c /dev/graphics/fb0 ] && command -v unzip >/dev/null 2>&1; then
-      rm -rf /tmp/ba
-      mkdir -p /tmp/ba
-      if unzip -o -q -d /tmp/ba "$ZIP" fbplayer >/dev/null 2>&1 && [ -s /tmp/ba/fbplayer ]; then
-        cp /tmp/ba/fbplayer "$PLAYER" 2>/dev/null && chmod 0755 "$PLAYER" 2>/dev/null
-      fi
+    if [ -z "$FBDIR" ]; then
+      FBWHY="no framebuffer device"
+    elif ! unpack_player; then
+      FBWHY="cannot unpack player"
+    else
+      FBMODE=1
     fi
     ;;
 esac
 [ -x "$PLAYER" ] || FBMODE=0
-say "fb=$FBMODE player=$PLAYER cols=$COLS"
+if [ "$FBMODE" = 1 ] && ! probe_player; then
+  FBMODE=0
+  FBWHY="framebuffer probe failed"
+fi
+say "fb=$FBMODE dev=$FBDIR player=$PLAYER why=$FBWHY cols=$COLS"
+if [ "$FBMODE" = 1 ]; then
+  ui_print "Screen mode: framebuffer ($FBDIR)"
+else
+  ui_print "Screen mode: console (${FBWHY:-no player})"
+fi
 
 if [ "$FBMODE" = 1 ]; then
   A0=$(date +%s)
@@ -415,7 +484,7 @@ if [ "$FBMODE" = 1 ]; then
     savelog
     exit 0
   fi
-  ui_print "Framebuffer failed, falling back to console"
+  ui_print "Framebuffer failed ($FBWHY), falling back to console"
 fi
 
 A0=$(date +%s)

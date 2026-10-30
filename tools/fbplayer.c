@@ -53,6 +53,7 @@ static int fb_bshift = 0;
 static int fb_pages = 1;
 static int fb_page = 0;
 static int fb_live = 0;
+static int probe_only = 0;
 static struct fb_var_screeninfo fb_var;
 
 static char frame_rows[MAX_ROWS][MAX_COLS + 1];
@@ -155,8 +156,10 @@ static void fb_open(void)
 	if (fb_map == MAP_FAILED)
 		die("mmap framebuffer");
 
-	/* Blank every page so nothing from the console survives. */
-	memset(fb_map, 0, fb_map_len);
+	/* Blank every page so nothing from the console survives.  In probe mode
+	 * the GUI is still running, so leave its picture alone. */
+	if (!probe_only)
+		memset(fb_map, 0, fb_map_len);
 
 	/* Bring the first page on screen and draw there; double buffering is
 	 * used below when the driver exposes two pages. */
@@ -346,6 +349,8 @@ int main(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--still") && i + 1 < argc) {
 			still = atol(argv[++i]);
+		} else if (!strcmp(argv[i], "--probe")) {
+			probe_only = 1;
 		} else if (!strcmp(argv[i], "--rows") && i + 1 < argc) {
 			nrows = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--cols") && i + 1 < argc) {
@@ -364,12 +369,17 @@ int main(int argc, char **argv)
 	}
 
 	in = frames_path ? fopen(frames_path, "r") : stdin;
-	if (!in) {
+	if (!in && !probe_only) {
 		perror(frames_path);
 		return 1;
 	}
 
 	fb_open();
+
+	if (probe_only) {
+		close(fb_fd);
+		return 0;
+	}
 
 	if (still >= 0) {
 		long skip;

@@ -71,7 +71,7 @@ python build.py --device begonia
 ```
 
 A prebuilt full player (3286 frames, 3:39) and the calibration zip are on the
-[releases page](https://github.com/methylphetamine/BadAppleTWRP/releases/tag/begonia-orangeFox-r12.2).
+[releases page](https://github.com/methylphetamine/BadAppleTWRP/releases/tag/begonia-orangeFox-r12.3).
 
 The framebuffer build (recommended - clears the screen every frame):
 ```sh
@@ -79,6 +79,22 @@ python tools/build-fbplayer.sh build/fbplayer
 python build.py --device begonia-fb
 # dist/BadApple_begonia_fb.zip
 ```
+
+It ships a static aarch64 player instead of printing frames. The installer
+stops the recovery GUI with `SIGSTOP`, blanks `/dev/graphics/fb0` and draws all
+19 rows for every frame, so each picture replaces the previous one, then always
+resumes the GUI with `SIGCONT` (trap plus watchdog). Before playback it prints
+`Screen mode: framebuffer (/dev/graphics/fb0)`. If it prints
+`Screen mode: console (<reason>)`, the framebuffer path was skipped and the
+reason is in the brackets and in `bad_apple_log.txt` at the root of your
+storage.
+
+Runtime overrides, read from `ba_*` files at the root of internal storage or an
+SD card:
+
+- `ba_fb` = `0` forces the console player, `1` forces the framebuffer.
+- `ba_nofreeze` keeps the recovery GUI running (the picture may flicker).
+- `ba_player` points at a different player binary.
 
 The console fallback:
 ```sh
