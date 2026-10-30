@@ -69,6 +69,9 @@ python build.py --device begonia
 # dist/BadApple_begonia_orangeFox_rows48.zip
 ```
 
+A prebuilt full player (3286 frames, 3:39) and the calibration zip are on the
+[releases page](https://github.com/methylphetamine/BadAppleTWRP/releases/tag/begonia-orangeFox-r12.1).
+
 `--device begonia` sets `/sbin/sh`, 48 console rows, 19 rows per frame,
 52 columns and the `rows48` output name. The name also acts as the runtime
 override, so the zip still works if `ba_rows` is absent. The profile does not
